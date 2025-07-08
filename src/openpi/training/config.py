@@ -217,7 +217,11 @@ class LeRobotAlohaDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "images": {"cam_high": "observation.images.top"},
+                        "images": {
+                            "cam_high": "observation.images.top",
+                            "cam_left_wrist": "observation.images.cam_left_wrist",
+                            "cam_right_wrist": "observation.images.cam_right_wrist",
+                        },
                         "state": "observation.state",
                         "actions": "action",
                     }
@@ -377,6 +381,111 @@ class RLDSDroidDataConfig(DataConfigFactory):
             use_quantile_norm=model_config.model_type == ModelType.PI0_FAST,
             rlds_data_dir=self.rlds_data_dir,
             action_space=self.action_space,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class PooltoolDataConfig(DataConfigFactory):
+    """
+    Data configuration for Pooltool billiards environment.
+    
+    This config defines the data processing pipeline for the pooltool billiards simulation environment,
+    including image transformations, state processing, and action mappings.
+    """
+    
+    # If true, will convert joint dimensions to deltas with respect to the current state.
+    # Pooltool uses absolute joint positions by default, so this enables delta action conversion.
+    use_delta_joint_actions: bool = True
+    
+    # Default prompt for billiards tasks if not provided in the dataset
+    default_prompt: str | None = "play billiards strategically"
+    
+    # Control mode for the robot arm: "high_level" for strategic actions, "low_level" for joint control
+    control_mode: str = "high_level"
+    
+    # Enable multi-step action sequences for complex shots
+    enable_action_sequences: bool = True
+    
+    # Repack transforms to map pooltool environment keys to model expected keys
+    repack_transforms: tyro.conf.Suppress[_transforms.Group] = dataclasses.field(
+        default=_transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        # Map pooltool image keys to standard openpi camera names
+                        "images": {
+                            "base_0_rgb": "observation.images.table_image_top",
+                            "left_wrist_0_rgb": "observation.images.wrist_camera", 
+                            "right_wrist_0_rgb": "observation.images.wrist_camera"  # Duplicate for compatibility
+                        },
+                        # Map robot and table state
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        
+                        # Additional pooltool-specific mappings
+                        "ball_positions": "observation.ball_positions",
+                        "ball_velocities": "observation.ball_velocities",
+                        "arm_joint_angles": "observation.arm_joint_angles",
+                        "arm_end_effector": "observation.arm_end_effector",
+                    }
+                )
+            ]
+        )
+    )
+    
+    # Action keys for reading action sequences from dataset
+    action_sequence_keys: Sequence[str] = ("action", "high_level_action", "robot_action", "cue_action")
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        # Import pooltool policy transforms
+        from openpi.policies import pooltool_policy
+        
+        # Create data transforms for pooltool environment
+        # These transforms convert between pooltool format and model format
+        data_transforms = _transforms.Group(
+            inputs=[
+                pooltool_policy.PooltoolInputs(
+                    action_dim=model_config.action_dim,
+                    image_resolution=(224, 224),  # Standard openpi image resolution
+                    max_prompt_tokens=model_config.max_token_len
+                )
+            ],
+            outputs=[
+                pooltool_policy.PooltoolOutputs(
+                    action_dim=model_config.action_dim,
+                    action_horizon=model_config.action_horizon,
+                    use_high_level_actions=(self.control_mode == "high_level"),
+                    enable_robot_control=True,
+                    enable_cue_actions=True
+                )
+            ],
+        )
+
+        # Apply delta action conversion if enabled
+        # For pooltool, we convert the first 6 dimensions (joint angles) to delta actions
+        # while keeping the remaining dimensions (cue/strategic actions) absolute
+        if self.use_delta_joint_actions:
+            # Create mask: first 6 dimensions are delta (robot joints), rest are absolute
+            delta_action_mask = _transforms.make_bool_mask(6, -1)
+            data_transforms = data_transforms.push(
+                inputs=[_transforms.DeltaActions(delta_action_mask)],
+                outputs=[_transforms.AbsoluteActions(delta_action_mask)],
+            )
+
+        # Create model transforms with prompt handling
+        model_transforms = ModelTransformFactory(default_prompt=self.default_prompt)(model_config)
+
+        # Return complete data config
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs),
+            repack_transforms=self.repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+            # Use quantile normalization for PI0-FAST models
+            use_quantile_norm=model_config.model_type == ModelType.PI0_FAST,
+            action_sequence_keys=self.action_sequence_keys,
         )
 
 
@@ -700,6 +809,103 @@ _CONFIGS = [
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
         num_train_steps=20_000,
+    ),
+    #
+    # Pooltool billiards configs.
+    #
+    # These configs are for training on the pooltool billiards simulation environment.
+    # They demonstrate robotic arm control for billiards gameplay with strategic planning.
+    TrainConfig(
+        name="pi0_pooltool",
+        # Standard pi0 model for full fine-tuning on billiards tasks
+        model=pi0.Pi0Config(
+            action_dim=32,        # 32-dimensional action space for pooltool
+            action_horizon=50,    # 50-step action horizon for complex shots
+            max_token_len=48      # Standard token length for prompts
+        ),
+        data=PooltoolDataConfig(
+            repo_id="pooltool_billiards",  # Replace with actual dataset repo when available
+            assets=AssetsConfig(asset_id="pooltool"),
+            default_prompt="play billiards strategically",
+            control_mode="high_level",     # Use high-level strategic actions
+            use_delta_joint_actions=True,  # Convert joint actions to deltas
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=30_000,
+        # Billiards requires longer sequences due to shot planning
+        batch_size=16,  # Smaller batch size due to longer sequences
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=1_000,
+            peak_lr=3e-5,  # Lower learning rate for fine-tuning
+            decay_steps=30_000,
+            decay_lr=1e-6,
+        ),
+    ),
+    TrainConfig(
+        name="pi0_fast_pooltool",
+        # Pi0-FAST model for efficient billiards training and inference
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=32,        # 32-dimensional action space
+            action_horizon=25,    # Shorter horizon for faster inference
+            max_token_len=120     # Slightly larger for billiards prompts
+        ),
+        data=PooltoolDataConfig(
+            repo_id="pooltool_billiards",
+            assets=AssetsConfig(asset_id="pooltool"),
+            default_prompt="execute precise billiards shots",
+            control_mode="high_level",
+            use_delta_joint_actions=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_fast_base/params"),
+        num_train_steps=25_000,
+        batch_size=32,  # Can use larger batch size with FAST model
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=5e-5,
+            decay_steps=25_000,
+            decay_lr=1e-6,
+        ),
+    ),
+    TrainConfig(
+        name="pi0_pooltool_low_level",
+        # Configuration for low-level robot control training
+        model=pi0.Pi0Config(
+            action_dim=32,
+            action_horizon=30,     # Shorter horizon for reactive control
+            max_token_len=32       # Minimal prompts for low-level control
+        ),
+        data=PooltoolDataConfig(
+            repo_id="pooltool_billiards",
+            assets=AssetsConfig(asset_id="pooltool"),
+            default_prompt="control robot arm precisely",
+            control_mode="low_level",      # Use low-level joint control
+            use_delta_joint_actions=True,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+        num_train_steps=20_000,
+        batch_size=24,
+        # Faster training for low-level control
+        lr_schedule=_optimizer.CosineDecaySchedule(
+            warmup_steps=500,
+            peak_lr=1e-4,  # Higher learning rate for low-level control
+            decay_steps=20_000,
+            decay_lr=1e-5,
+        ),
+    ),
+    TrainConfig(
+        name="pi0_pooltool_sim",
+        # Simplified configuration for simulation and testing
+        model=pi0.Pi0Config(action_dim=32, action_horizon=10),
+        data=PooltoolDataConfig(
+            repo_id=None,  # Use fake data for simulation
+            default_prompt="practice billiards in simulation",
+            control_mode="high_level",
+        ),
+        # No pre-trained weights for pure simulation training
+        num_train_steps=10_000,
+        batch_size=8,
+        save_interval=500,
+        wandb_enabled=False,  # Disable wandb for simulation
     ),
     #
     # Debugging configs.

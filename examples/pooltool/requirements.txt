@@ -1,0 +1,38 @@
+# Pooltool 独立环境专用依赖
+# 基于解耦架构，避免与主 openpi 环境冲突
+
+# 核心物理仿真（目标：真实 pooltool 集成）
+# pooltool-billiards  # 待解决 panda3d 依赖冲突后启用
+
+# 临时替代方案：基础物理仿真
+numpy>=1.22.4
+scipy>=1.9.0
+pygame>=2.1.0
+pymunk>=6.4.0      # 2D 物理引擎替代
+
+# 3D 渲染和图像处理
+Pillow>=9.0.0
+opencv-python>=4.6.0
+matplotlib>=3.5.0
+
+# WebSocket 通信
+websockets>=11.0
+asyncio-mqtt>=0.11.0  # 可选的 MQTT 通信
+aiohttp>=3.8.0
+
+# 机械臂运动学
+robotics-toolbox-python>=1.0.0  # 可选，用于精确运动学
+scipy>=1.9.0
+
+# 工具库
+click>=8.0.0         # 命令行界面
+rich>=13.0.0         # 美观输出
+pyyaml>=6.0          # 配置文件
+attrs>=22.0.0        # 数据类
+
+# 开发和测试
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+
+# 注意：当 panda3d 依赖冲突解决后，可以直接安装：
+# git+https://github.com/ekiefl/pooltool.git 
