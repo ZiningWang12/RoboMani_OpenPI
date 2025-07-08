@@ -105,21 +105,38 @@ class FASTTokenizer:
         return np.asarray(tokens), np.asarray(token_mask), np.asarray(ar_mask), np.asarray(loss_mask)
 
     def extract_actions(self, tokens: np.ndarray, action_horizon: int, action_dim: int) -> np.ndarray:
-        # Decode predicted output tokens
-        decoded_tokens = self._paligemma_tokenizer.decode(tokens.tolist())
+        try:
+            # Decode predicted output tokens
+            decoded_tokens = self._paligemma_tokenizer.decode(tokens.tolist())
 
-        # Extract actions from FAST model outputs
-        if "Action: " not in decoded_tokens:
+            # Extract actions from FAST model outputs
+            if "Action: " not in decoded_tokens:
+                logging.warning("No 'Action: ' found in decoded tokens, returning zeros")
+                return np.zeros((action_horizon, action_dim), dtype=np.float32)
+
+            # Extract actions from decoded tokens
+            action_text = decoded_tokens.split("Action: ")[1].split("|")[0].strip()
+            raw_action_tokens = np.array(self._paligemma_tokenizer.encode(action_text))
+            
+            if len(raw_action_tokens) == 0:
+                logging.warning("No action tokens found, returning zeros")
+                return np.zeros((action_horizon, action_dim), dtype=np.float32)
+                
+            action_tokens = self._act_tokens_to_paligemma_tokens(raw_action_tokens)
+            
+            # Use the FAST tokenizer to decode actions
+            decoded_actions = self._fast_tokenizer.decode(
+                [action_tokens.tolist()], time_horizon=action_horizon, action_dim=action_dim
+            )[0]
+            
+            return decoded_actions
+            
+        except Exception as e:
+            # Handle reshape errors and other decoding issues gracefully
+            logging.error(f"Error decoding tokens: {e}")
+            logging.error(f"Tokens: {tokens[:20]}")  # Show first 20 tokens for debugging
+            # Return zero actions as fallback to avoid crashing the system
             return np.zeros((action_horizon, action_dim), dtype=np.float32)
-
-        # Extract actions from decoded tokens
-        raw_action_tokens = np.array(
-            self._paligemma_tokenizer.encode(decoded_tokens.split("Action: ")[1].split("|")[0].strip())
-        )
-        action_tokens = self._act_tokens_to_paligemma_tokens(raw_action_tokens)
-        return self._fast_tokenizer.decode(
-            [action_tokens.tolist()], time_horizon=action_horizon, action_dim=action_dim
-        )[0]
 
     def _act_tokens_to_paligemma_tokens(self, tokens: np.ndarray | list[int]) -> np.ndarray:
         if isinstance(tokens, list):
