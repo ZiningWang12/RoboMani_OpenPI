@@ -1,0 +1,153 @@
+# Pool Robot Simulation Docker Compose
+# 台球机械臂仿真 Docker Compose 配置
+
+version: '3.8'
+
+services:
+  # 台球机械臂仿真服务
+  pool-simulation:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: openpi/pool-robot:latest
+    container_name: pool-robot-sim
+    
+    # 环境变量
+    environment:
+      - DISPLAY=${DISPLAY:-:0}
+      - MUJOCO_GL=egl
+      - PYTHONUNBUFFERED=1
+      - SIMULATION_MODE=${SIMULATION_MODE:-headless}
+    
+    # 卷挂载
+    volumes:
+      - ./data:/workspace/data
+      - /tmp/.X11-unix:/tmp/.X11-unix:rw  # X11转发
+    
+    # 网络配置
+    networks:
+      - pool-network
+    
+    # 资源限制
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+        reservations:
+          memory: 2G
+          cpus: '1.0'
+    
+    # 重启策略
+    restart: unless-stopped
+    
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import pooltool, pybullet; print('OK')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    
+    # 默认命令
+    command: ["--task", "evaluation", "--trials", "3", "--no-gui"]
+
+  # OpenPI策略服务器（可选）
+  openpi-server:
+    image: openpi/server:latest  # 假设的OpenPI服务器镜像
+    container_name: openpi-policy-server
+    
+    environment:
+      - POLICY_CONFIG=pi0_fast_droid
+      - SERVER_PORT=8000
+      - GPU_ENABLED=true
+    
+    ports:
+      - "8000:8000"
+    
+    networks:
+      - pool-network
+    
+    # GPU支持（如果可用）
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    
+    # 仅在需要时启动
+    profiles:
+      - openpi
+    
+    restart: unless-stopped
+
+  # 数据可视化服务（可选）
+  visualization:
+    image: nginx:alpine
+    container_name: pool-results-viewer
+    
+    ports:
+      - "8080:80"
+    
+    volumes:
+      - ./data:/usr/share/nginx/html/data:ro
+      - ./visualization:/usr/share/nginx/html:ro
+    
+    networks:
+      - pool-network
+    
+    # 仅在需要时启动
+    profiles:
+      - viz
+    
+    restart: unless-stopped
+
+networks:
+  pool-network:
+    driver: bridge
+    name: pool-robot-network
+
+volumes:
+  # 持久化数据存储
+  pool-data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./data
+
+# 扩展配置
+x-common-variables: &common-variables
+  PYTHONUNBUFFERED: 1
+  TZ: UTC
+
+# 服务模板
+x-base-service: &base-service
+  networks:
+    - pool-network
+  restart: unless-stopped
+  logging:
+    driver: "json-file"
+    options:
+      max-size: "10m"
+      max-file: "3"
+
+# 预定义的运行配置
+x-run-configs:
+  # 快速测试
+  - &quick-test
+    command: ["--task", "pot_ball", "--trials", "1", "--no-gui"]
+  
+  # 完整评估
+  - &full-evaluation
+    command: ["--task", "evaluation", "--trials", "5", "--no-gui"]
+  
+  # 开发模式
+  - &development
+    command: ["--task", "pot_ball", "--trials", "1", "--gui"]
+    volumes:
+      - .:/workspace
+    environment:
+      - DEVELOPMENT_MODE=true 

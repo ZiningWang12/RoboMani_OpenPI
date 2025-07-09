@@ -1,0 +1,37 @@
+# Core pooltool dependencies from pyproject.toml
+# NOTE: Python >=3.10,<3.14 required
+--extra-index-url https://archive.panda3d.org/simple/
+
+# Core dependencies
+panda3d==1.11.0.dev3702  # Linux specific version from panda3d-archive
+panda3d-gltf>=1.2.0
+panda3d-simplepbr>=0.12.0
+numpy>=1.26.0
+numba>=0.59.0
+llvmlite>=0.44.0
+scipy>=1.12.0
+attrs>=21.3.0
+cattrs>=22.1.0
+msgpack>=1.0.0
+msgpack-numpy>=0.4.8
+pyyaml>=5.2
+click>=8.0.0
+Pillow>=6.2.0
+h5py>=3.10
+h11>=0.16.0
+rich>=14.0.0
+
+# Computer vision and image processing
+opencv-python>=4.5.0
+
+# Scientific computing
+matplotlib>=3.3.0
+tqdm>=4.60.0
+tyro>=0.5.0
+
+# Optional physics engines for robot arm simulation
+pybullet>=3.2.0
+
+# Networking and communication
+websocket-client>=1.0.0
+imageio[ffmpeg]>=2.9.0 
