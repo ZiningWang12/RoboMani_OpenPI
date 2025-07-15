@@ -1,94 +1,115 @@
-# Pool Robot Simulation Docker Image
-# 台球机械臂仿真Docker镜像
-FROM ubuntu:22.04
+# Dockerfile for PoolTool台球仿真环境
+# 解决panda3d依赖和可视化问题
 
-LABEL maintainer="OpenPI Team"
-LABEL description="Pool Robot Simulation with OpenPI and Pooltool"
-LABEL version="1.0.0"
+# Build the container:
+# docker build . -t pooltool -f examples/pooltool/Dockerfile
 
-# 设置环境变量
-ENV DEBIAN_FRONTEND=noninteractive
-ENV PYTHONUNBUFFERED=1
-ENV DISPLAY=:0
-ENV QT_X11_NO_MITSHM=1
-ENV MUJOCO_GL=egl
+# Run the container:
+# docker run --rm -it --network=host -v .:/app -v /tmp/.X11-unix:/tmp/.X11-unix:ro -e DISPLAY=$DISPLAY --gpus all pooltool /bin/bash
 
-# 安装系统依赖
-RUN apt-get update && apt-get install -y \
-    python3.10 \
-    python3.10-venv \
-    python3.10-dev \
-    python-is-python3 \
-    pip \
-    curl \
-    wget \
-    git \
-    build-essential \
-    cmake \
-    pkg-config \
-    libegl1-mesa-dev \
+FROM nvidia/cuda:12.2.2-cudnn8-runtime-ubuntu22.04@sha256:2d913b09e6be8387e1a10976933642c73c840c0b735f0bf3c28d97fc9bc422e0
+COPY --from=ghcr.io/astral-sh/uv:0.5.1 /uv /uvx /bin/
+
+# 安装系统依赖 - 图形渲染和构建工具
+RUN apt-get update && \
+    apt-get install -y \
+    make \
+    g++ \
+    clang \
+    libosmesa6-dev \
+    libgl1-mesa-glx \
     libgl1-mesa-dev \
-    libglu1-mesa-dev \
+    libglew-dev \
     libglfw3-dev \
     libgles2-mesa-dev \
-    xvfb \
-    x11-apps \
-    mesa-utils \
+    libglib2.0-0 \
+    libsm6 \
+    libxrender1 \
+    libxext6 \
+    libx11-dev \
+    libxrandr-dev \
+    libxi-dev \
+    libxcursor-dev \
+    libxinerama-dev \
+    libfreetype6-dev \
+    libassimp-dev \
+    libopenal-dev \
+    libvorbis-dev \
+    libssl-dev \
+    git \
+    pkg-config \
+    ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-# 安装UV包管理器
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
-ENV PATH="/root/.local/bin:$PATH"
+WORKDIR /app
 
-# 设置工作目录
-WORKDIR /workspace
+# Copy from the cache instead of linking since it's a mounted volume
+ENV UV_LINK_MODE=copy
 
-# 复制项目文件
-COPY requirements.txt requirements.in ./
-COPY *.py ./
-COPY README.md ./
+# Write the virtual environment outside of the project directory so it doesn't
+# leak out of the container when we mount the application code.
+ENV UV_PROJECT_ENVIRONMENT=/.venv
 
-# 创建Python虚拟环境并安装依赖
-RUN uv venv --python 3.10 .venv
-RUN .venv/bin/pip install --upgrade pip
-RUN .venv/bin/pip install -r requirements.txt
+# 复制requirements文件
+COPY ./examples/pooltool/requirements.txt /tmp/requirements.txt
+
+# 创建Python环境并安装依赖
+# 使用Python 3.10确保兼容性
+RUN uv venv --python 3.10 $UV_PROJECT_ENVIRONMENT
+
+# 安装基础依赖（不指定具体版本，让uv解析）
+RUN uv pip install \
+    numpy \
+    scipy \
+    matplotlib \
+    imageio \
+    tqdm \
+    msgpack \
+    pyyaml \
+    click \
+    mujoco \
+    gymnasium \
+    dm-control \
+    opencv-python \
+    pillow \
+    tyro \
+    websockets \
+    pytest \
+    black
+
+# 添加panda3d archive源并安装panda3d
+RUN uv pip install --extra-index-url https://archive.panda3d.org/simple/ \
+    --pre \
+    panda3d==1.11.0.dev3702
+
+# 安装panda3d扩展
+RUN uv pip install \
+    panda3d-gltf \
+    panda3d-simplepbr
+
+# 安装pooltool依赖（让poetry解析版本）
+COPY ./third_party/pooltool /tmp/pooltool
+RUN cd /tmp/pooltool && \
+    uv pip install --extra-index-url https://archive.panda3d.org/simple/ \
+    attrs \
+    cattrs \
+    msgpack-numpy \
+    numba \
+    llvmlite \
+    h5py \
+    h11 \
+    rich
+
+# 设置环境变量
+ENV PYTHONPATH=/app:/app/third_party/pooltool
+ENV PANDA3D_WINDOW_TYPE=offscreen
 
 # 创建数据目录
-RUN mkdir -p data/pooltool_results
+RUN mkdir -p /app/data/pooltool/milestone1 \
+    /app/data/pooltool/milestone2 \
+    /app/data/pooltool/milestone3
 
-# 创建启动脚本
-RUN echo '#!/bin/bash\n\
-set -e\n\
-echo "🎱 Starting Pool Robot Simulation Container"\n\
-echo "========================================"\n\
-\n\
-# 激活虚拟环境\n\
-source .venv/bin/activate\n\
-\n\
-# 验证环境\n\
-echo "Verifying environment..."\n\
-python -c "import pooltool, pybullet; print(\"✅ Environment verified\")" || {\n\
-    echo "❌ Environment verification failed"\n\
-    exit 1\n\
-}\n\
-\n\
-# 运行仿真\n\
-echo "Starting simulation with parameters: $@"\n\
-python main.py "$@"\n\
-' > /workspace/start.sh && chmod +x /workspace/start.sh
+# 设置工作目录权限
+RUN chmod -R 755 /app
 
-# 设置启动脚本为入口点
-ENTRYPOINT ["/workspace/start.sh"]
-
-# 默认参数
-CMD ["--task", "evaluation", "--trials", "3", "--no-gui"]
-
-# 健康检查
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD python -c "import pooltool, pybullet; print('OK')" || exit 1
-
-# 暴露端口（如果需要Web界面）
-EXPOSE 8080
-
-# 设置卷挂载点
-VOLUME ["/workspace/data"] 
+CMD ["/bin/bash", "-c", "source /.venv/bin/activate && cd /app/examples/pooltool && python milestone1_basic_pooltool.py"] 
